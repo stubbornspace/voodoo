@@ -1,15 +1,25 @@
 import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View, ImageBackground, TouchableOpacity, Animated, TextInput, Alert } from 'react-native';
+import { StyleSheet, Text, View, ImageBackground, TouchableOpacity, Animated, TextInput, Alert, Dimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useState, useRef } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+
+const { width } = Dimensions.get('window');
 
 export default function App() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [documents, setDocuments] = useState([]);
-  const [currentDocument, setCurrentDocument] = useState(null);
+  const [currentDocument, setCurrentDocument] = useState({
+    id: 'initial',
+    title: 'Untitled',
+    content: '',
+    createdAt: new Date().toISOString(),
+  });
   const [documentContent, setDocumentContent] = useState('');
+  const [filename, setFilename] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
   const slideAnim = useRef(new Animated.Value(0)).current;
 
   const toggleMenu = () => {
@@ -35,24 +45,61 @@ export default function App() {
   };
 
   const saveDocument = async () => {
-    if (!currentDocument) return;
+    if (!documentContent.trim()) {
+      Alert.alert('Error', 'There is no content to save');
+      return;
+    }
 
     try {
-      const updatedDoc = {
-        ...currentDocument,
-        content: documentContent,
-        updatedAt: new Date().toISOString(),
-      };
+      setIsSaving(true);
+      
+      // Prompt for filename
+      Alert.prompt(
+        'Save File',
+        'Enter filename:',
+        [
+          {
+            text: 'Cancel',
+            style: 'cancel',
+            onPress: () => setIsSaving(false),
+          },
+          {
+            text: 'Save',
+            onPress: async (name) => {
+              if (!name) {
+                Alert.alert('Error', 'Please enter a filename');
+                setIsSaving(false);
+                return;
+              }
 
-      const updatedDocuments = documents.map(doc => 
-        doc.id === currentDocument.id ? updatedDoc : doc
+              const filename = name.endsWith('.txt') ? name : `${name}.txt`;
+              const fileUri = `${FileSystem.documentDirectory}${filename}`;
+
+              try {
+                // Write the file
+                await FileSystem.writeAsStringAsync(fileUri, documentContent);
+                
+                // Share the file to let user choose location
+                await Sharing.shareAsync(fileUri, {
+                  mimeType: 'text/plain',
+                  dialogTitle: 'Save your file',
+                });
+
+                Alert.alert('Success', 'File saved successfully!');
+              } catch (error) {
+                Alert.alert('Error', 'Failed to save file');
+              } finally {
+                setIsSaving(false);
+              }
+            },
+          },
+        ],
+        'plain-text',
+        currentDocument?.title || 'untitled'
       );
-
-      setDocuments(updatedDocuments);
-      setCurrentDocument(updatedDoc);
-      Alert.alert('Success', 'Document saved successfully!');
     } catch (error) {
-      Alert.alert('Error', 'Failed to save document');
+      Alert.alert('Error', 'Failed to save file');
+      setIsSaving(false);
     }
   };
 
@@ -64,20 +111,36 @@ export default function App() {
       });
 
       if (result.type === 'success') {
-        const content = await FileSystem.readAsStringAsync(result.uri);
-        const newDoc = {
-          id: Date.now().toString(),
-          title: result.name,
-          content: content,
-          createdAt: new Date().toISOString(),
-        };
-        setDocuments([...documents, newDoc]);
-        setCurrentDocument(newDoc);
-        setDocumentContent(content);
-        toggleMenu();
+        try {
+          // Read the file content
+          const content = await FileSystem.readAsStringAsync(result.uri);
+          
+          // Create a new document with the content
+          const newDoc = {
+            id: Date.now().toString(),
+            title: result.name,
+            content: content,
+            createdAt: new Date().toISOString(),
+          };
+          
+          // Update state
+          setDocuments(prevDocs => [...prevDocs, newDoc]);
+          setCurrentDocument(newDoc);
+          setDocumentContent(content);
+          
+          // Close the drawer
+          toggleMenu();
+          
+          // Show success message
+          Alert.alert('Success', 'File opened successfully!');
+        } catch (readError) {
+          console.error('Error reading file:', readError);
+          Alert.alert('Error', 'Failed to read file content');
+        }
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to open document');
+      console.error('Error opening file:', error);
+      Alert.alert('Error', 'Failed to open file');
     }
   };
 
@@ -95,21 +158,22 @@ export default function App() {
           >
             <Ionicons name={isMenuOpen ? "close" : "menu"} size={30} color="white" />
           </TouchableOpacity>
-          
-          <Animated.View 
-            style={[
-              styles.dropdown,
-              {
-                opacity: slideAnim,
-                transform: [{
-                  translateY: slideAnim.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [-20, 0]
-                  })
-                }]
-              }
-            ]}
-          >
+        </View>
+
+        <Animated.View 
+          style={[
+            styles.drawer,
+            {
+              transform: [{
+                translateX: slideAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [width, 0]
+                })
+              }]
+            }
+          ]}
+        >
+          <View style={styles.drawerContent}>
             <TouchableOpacity style={styles.menuItem} onPress={createNewDocument}>
               <Ionicons name="document" size={20} color="white" style={styles.menuIcon} />
               <Text style={styles.menuItemText}>New</Text>
@@ -122,22 +186,18 @@ export default function App() {
               <Ionicons name="folder-open" size={20} color="white" style={styles.menuIcon} />
               <Text style={styles.menuItemText}>Open</Text>
             </TouchableOpacity>
-          </Animated.View>
-        </View>
+          </View>
+        </Animated.View>
 
         <View style={styles.editorContainer}>
-          {currentDocument ? (
-            <TextInput
-              style={styles.editor}
-              multiline
-              value={documentContent}
-              onChangeText={setDocumentContent}
-              placeholder="Start typing..."
-              placeholderTextColor="rgba(255, 255, 255, 0.5)"
-            />
-          ) : (
-            <Text style={styles.placeholderText}>Create a new document or open an existing one to start editing</Text>
-          )}
+          <TextInput
+            style={styles.editor}
+            multiline
+            value={documentContent}
+            onChangeText={setDocumentContent}
+            placeholder="Make it so"
+            placeholderTextColor="rgba(255, 255, 255, 0.5)"
+          />
         </View>
         <StatusBar style="light" />
       </ImageBackground>
@@ -156,34 +216,29 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 50,
     right: 20,
-    zIndex: 1,
-    alignItems: 'flex-end',
+    zIndex: 3,
   },
   menuButton: {
     padding: 10,
     borderRadius: 20,
   },
-  dropdown: {
+  drawer: {
     position: 'absolute',
-    top: 50,
+    top: 0,
     right: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.9)',
-    borderRadius: 10,
-    padding: 10,
-    minWidth: 200,
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
-    elevation: 5,
+    width: width * 0.3,
+    height: '100%',
+    backgroundColor: 'rgba(0, 0, 50, 0.8)',
+    zIndex: 2,
+  },
+  drawerContent: {
+    paddingTop: 100,
+    paddingHorizontal: 20,
   },
   menuItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
+    paddingVertical: 15,
     paddingHorizontal: 15,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255, 255, 255, 0.1)',
@@ -193,13 +248,14 @@ const styles = StyleSheet.create({
   },
   menuItemText: {
     color: 'white',
-    fontSize: 16,
+    fontSize: 18,
   },
   editorContainer: {
     flex: 1,
     padding: 20,
     paddingTop: 100,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   editor: {
     flex: 1,
@@ -214,8 +270,8 @@ const styles = StyleSheet.create({
   },
   placeholderText: {
     color: 'rgba(255, 255, 255, 0.7)',
-    fontSize: 18,
+    fontSize: 24,
     textAlign: 'center',
-    marginTop: 100,
+    marginTop: -100,
   },
 });
